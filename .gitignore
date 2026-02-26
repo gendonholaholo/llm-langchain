@@ -1,0 +1,23 @@
+# macOS resource forks (external volume)
+._*
+.DS_Store
+
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+.venv
+
+.env
+
+*.log
+*.sqlite
+
+.ruff_cache/
+.pyright/
+.pytest_cache/
+htmlcov/
+.coverage

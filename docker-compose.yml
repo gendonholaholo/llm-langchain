@@ -1,0 +1,56 @@
+name: llm-langchain-development
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: postgres-llm-langchain-development
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: whatsapp_bot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data-llm-langchain-development:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - network-llm-langchain-development
+
+  waha:
+    image: devlikeapro/waha
+    container_name: waha-llm-langchain-development
+    ports:
+      - "3000:3000"
+    networks:
+      - network-llm-langchain-development
+
+  app:
+    build: .
+    container_name: app-llm-langchain-development
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/whatsapp_bot
+      WAHA_API_URL: http://waha:3000
+    volumes:
+      - ./data/knowledge:/app/data/knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      waha:
+        condition: service_started
+    networks:
+      - network-llm-langchain-development
+
+volumes:
+  postgres-data-llm-langchain-development:
+
+networks:
+  network-llm-langchain-development:
+    driver: bridge
