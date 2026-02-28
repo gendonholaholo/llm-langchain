@@ -1471,6 +1471,7 @@ dependencies = [
     { name = "pypdf" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
+    { name = "tenacity" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1504,6 +1505,7 @@ requires-dist = [
     { name = "pypdf", specifier = ">=5.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.4" },
+    { name = "tenacity", specifier = ">=9.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
 

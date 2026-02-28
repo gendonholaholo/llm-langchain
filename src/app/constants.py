@@ -51,6 +51,13 @@ MAX_MESSAGE_LENGTH = 4000
 CONVERSATION_TIMEOUT_HOURS = 24
 EMBEDDING_DIMENSIONS = 1536
 
+# Retry configuration
+MAX_RETRY_ATTEMPTS = 3
+RETRY_MIN_WAIT_SECONDS = 1
+RETRY_MAX_WAIT_SECONDS = 10
+HTTP_TIMEOUT_SECONDS = 30.0
+LLM_TIMEOUT_SECONDS = 60.0
+
 # PII patterns (Indonesian-focused)
 PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "nik": re.compile(r"\b\d{16}\b"),

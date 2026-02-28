@@ -3,6 +3,13 @@
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
+from openai import RateLimitError as OpenAIRateLimitError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.agent.prompts import (
     BLOCKED_RESPONSE,
@@ -12,7 +19,16 @@ from app.agent.prompts import (
     SYSTEM_PROMPT,
 )
 from app.agent.state import AgentState
-from app.constants import BookingStep, Intent, ModelName
+from app.constants import (
+    BookingStep,
+    Intent,
+    LLM_TIMEOUT_SECONDS,
+    MAX_RETRY_ATTEMPTS,
+    ModelName,
+    RETRY_MAX_WAIT_SECONDS,
+    RETRY_MIN_WAIT_SECONDS,
+)
+from app.core.exceptions import ExternalAPIError, LLMError
 from app.guardrails.content_moderator import check_content_moderation
 from app.guardrails.injection_detector import detect_injection
 from app.guardrails.pii_detector import detect_pii
@@ -23,9 +39,49 @@ from app.services.booking_api import BookingAPIClient
 
 logger = structlog.get_logger(__name__)
 
-_router_llm = ChatOpenAI(model=ModelName.GPT_4O_MINI, temperature=0, max_tokens=20)
-_chat_llm = ChatOpenAI(model=ModelName.GPT_4O, temperature=0.7, max_tokens=500)
-_booking_llm = ChatOpenAI(model=ModelName.GPT_4O, temperature=0.3, max_tokens=500)
+# LLM instances with built-in retry
+_router_llm = ChatOpenAI(
+    model=ModelName.GPT_4O_MINI,
+    temperature=0,
+    max_tokens=20,
+    timeout=LLM_TIMEOUT_SECONDS,
+    max_retries=MAX_RETRY_ATTEMPTS,
+)
+_chat_llm = ChatOpenAI(
+    model=ModelName.GPT_4O,
+    temperature=0.7,
+    max_tokens=500,
+    timeout=LLM_TIMEOUT_SECONDS,
+    max_retries=MAX_RETRY_ATTEMPTS,
+)
+_booking_llm = ChatOpenAI(
+    model=ModelName.GPT_4O,
+    temperature=0.3,
+    max_tokens=500,
+    timeout=LLM_TIMEOUT_SECONDS,
+    max_retries=MAX_RETRY_ATTEMPTS,
+)
+
+
+def create_llm_retry_decorator(operation_name: str):
+    """Create retry decorator for LLM calls."""
+
+    def before_sleep(retry_state):
+        logger.warning(
+            f"{operation_name}.retry",
+            attempt=retry_state.attempt_number,
+        )
+
+    return retry(
+        retry=retry_if_exception_type(OpenAIRateLimitError),
+        stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            min=RETRY_MIN_WAIT_SECONDS,
+            max=RETRY_MAX_WAIT_SECONDS,
+        ),
+        before_sleep=before_sleep,
+        reraise=True,
+    )
 
 
 def _get_last_user_message(state: AgentState) -> str:
@@ -78,7 +134,17 @@ async def router_node(state: AgentState) -> dict:
     """Classify user intent for routing."""
     user_msg = _get_last_user_message(state)
     prompt = ROUTER_PROMPT.format(message=user_msg)
-    response = await _router_llm.ainvoke(prompt)
+
+    retry_decorator = create_llm_retry_decorator("router_llm")
+
+    @retry_decorator
+    async def _invoke_router():
+        try:
+            return await _router_llm.ainvoke(prompt)
+        except Exception as e:
+            raise LLMError(f"Router LLM failed: {e}", "Unable to process your message.")
+
+    response = await _invoke_router()
     raw_intent = str(response.content).strip().lower()
 
     try:
@@ -87,7 +153,6 @@ async def router_node(state: AgentState) -> dict:
         intent = Intent.GENERAL
         logger.warning("router.unknown_intent", raw=raw_intent)
 
-    # Detect language from message
     detected_language = state.get("detected_language", "Indonesian")
 
     return {"intent": intent, "detected_language": detected_language}
@@ -104,7 +169,17 @@ async def general_respond_node(state: AgentState) -> dict:
     """Handle greetings and general conversation."""
     system = SYSTEM_PROMPT.format(detected_language=state.get("detected_language", "Indonesian"))
     messages = [{"role": "system", "content": system}, *_format_messages(state)]
-    response = await _chat_llm.ainvoke(messages)
+
+    retry_decorator = create_llm_retry_decorator("general_llm")
+
+    @retry_decorator
+    async def _invoke_chat():
+        try:
+            return await _chat_llm.ainvoke(messages)
+        except Exception as e:
+            raise LLMError(f"Chat LLM failed: {e}", "Unable to generate response.")
+
+    response = await _invoke_chat()
     return {"messages": [AIMessage(content=str(response.content))]}
 
 
@@ -127,7 +202,17 @@ async def rag_respond_node(state: AgentState) -> dict:
         question=user_msg,
         detected_language=state.get("detected_language", "Indonesian"),
     )
-    response = await _chat_llm.ainvoke(prompt)
+
+    retry_decorator = create_llm_retry_decorator("rag_llm")
+
+    @retry_decorator
+    async def _invoke_rag():
+        try:
+            return await _chat_llm.ainvoke(prompt)
+        except Exception as e:
+            raise LLMError(f"RAG LLM failed: {e}", "Unable to retrieve information.")
+
+    response = await _invoke_rag()
     return {"messages": [AIMessage(content=str(response.content))]}
 
 
@@ -137,7 +222,6 @@ async def booking_node(state: AgentState) -> dict:
     booking_params = state.get("booking_params", {})
     booking_step = state.get("booking_step", BookingStep.IDLE)
 
-    # Parse the current step and extract info from user message
     params = BookingParams(**booking_params)
 
     if booking_step == BookingStep.IDLE:
@@ -161,7 +245,17 @@ async def booking_node(state: AgentState) -> dict:
         booking_step=booking_step,
         detected_language=state.get("detected_language", "Indonesian"),
     )
-    response = await _booking_llm.ainvoke(prompt)
+
+    retry_decorator = create_llm_retry_decorator("booking_llm")
+
+    @retry_decorator
+    async def _invoke_booking():
+        try:
+            return await _booking_llm.ainvoke(prompt)
+        except Exception as e:
+            raise LLMError(f"Booking LLM failed: {e}", "Unable to process booking.")
+
+    response = await _invoke_booking()
 
     return {
         "messages": [AIMessage(content=str(response.content))],
@@ -203,6 +297,9 @@ async def submit_booking_node(state: AgentState) -> dict:
             )
         else:
             text = f"Sorry, the booking could not be completed: {result.message}"
+    except ExternalAPIError as e:
+        logger.exception("booking.submit_failed")
+        text = e.user_message
     except Exception:
         logger.exception("booking.submit_failed")
         text = "Sorry, there was an error processing your booking. Please try again later."
@@ -224,3 +321,4 @@ def _format_messages(state: AgentState) -> list[dict[str, str]]:
         elif isinstance(msg, AIMessage):
             result.append({"role": "assistant", "content": str(msg.content)})
     return result
+

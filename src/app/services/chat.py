@@ -17,6 +17,7 @@ from app.constants import (
     Role,
 )
 from app.core.database import async_session_factory
+from app.core.exceptions import AppException, ExternalAPIError, LLMError
 from app.models.db import Conversation, Message
 from app.services.waha_client import WahaClient
 
@@ -114,17 +115,32 @@ class ChatService:
                 reply_length=len(reply_text),
             )
 
+        except LLMError as e:
+            logger.error("chat.llm_error", phone_number=phone_number, error=str(e))
+            await ChatService._send_error_reply(waha, chat_id, e.user_message)
+        except ExternalAPIError as e:
+            logger.error("chat.api_error", phone_number=phone_number, error=str(e))
+            await ChatService._send_error_reply(waha, chat_id, e.user_message)
+        except AppException as e:
+            logger.error("chat.app_error", phone_number=phone_number, error=str(e))
+            await ChatService._send_error_reply(waha, chat_id, e.user_message)
         except Exception:
             logger.exception("chat.process_failed", phone_number=phone_number)
-            try:
-                await waha.send_text(
-                    chat_id,
-                    "Sorry, an error occurred. Please try again later.",
-                )
-            except Exception:
-                logger.exception("chat.error_reply_failed")
+            await ChatService._send_error_reply(
+                waha,
+                chat_id,
+                "Sorry, an unexpected error occurred. Please try again later.",
+            )
         finally:
             await waha.close()
+
+    @staticmethod
+    async def _send_error_reply(waha: WahaClient, chat_id: str, message: str) -> None:
+        """Send error message to user."""
+        try:
+            await waha.send_text(chat_id, message)
+        except Exception:
+            logger.exception("chat.error_reply_failed")
 
     @staticmethod
     async def _get_or_create_conversation(
@@ -171,3 +187,4 @@ class ChatService:
                 history.append(AIMessage(content=msg.content))
 
         return history
+

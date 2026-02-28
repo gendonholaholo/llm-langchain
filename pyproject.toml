@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-settings>=2.7",
     "pypdf>=5.0",
     "structlog>=24.4",
+    "tenacity>=9.0",
 ]
 
 [dependency-groups]

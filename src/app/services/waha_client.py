@@ -1,9 +1,10 @@
 """Async HTTP client for WAHA (WhatsApp HTTP API)."""
 
-import httpx
 import structlog
 
 from app.core.config import settings
+from app.core.exceptions import ExternalAPIError
+from app.core.http_client import BaseHTTPClient
 
 logger = structlog.get_logger(__name__)
 
@@ -15,7 +16,7 @@ class WahaClient:
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if settings.waha_api_key:
             headers["Authorization"] = f"Bearer {settings.waha_api_key}"
-        self._client = httpx.AsyncClient(base_url=self._base_url, headers=headers, timeout=30.0)
+        self._client = BaseHTTPClient(base_url=self._base_url, headers=headers)
 
     async def send_text(self, chat_id: str, text: str) -> dict:
         """Send a text message to a WhatsApp chat."""
@@ -24,8 +25,9 @@ class WahaClient:
             "text": text,
             "session": self._session,
         }
-        response = await self._client.post("/api/sendText", json=payload)
-        response.raise_for_status()
+        response = await self._client.post(
+            "/api/sendText", "waha.send_text", json=payload
+        )
         data: dict = response.json()
         logger.info("waha.send_text", chat_id=chat_id, text_length=len(text))
         return data
@@ -34,18 +36,18 @@ class WahaClient:
         """Mark a chat as seen/read."""
         payload = {"chatId": chat_id, "session": self._session}
         try:
-            response = await self._client.post("/api/sendSeen", json=payload)
-            response.raise_for_status()
-        except httpx.HTTPError:
+            await self._client.post("/api/sendSeen", "waha.send_seen", json=payload)
+        except ExternalAPIError:
             logger.warning("waha.send_seen_failed", chat_id=chat_id)
 
     async def check_health(self) -> bool:
         """Check if WAHA is reachable."""
         try:
-            response = await self._client.get("/api/sessions")
+            response = await self._client.get("/api/sessions", "waha.health_check")
             return response.status_code == 200
-        except httpx.HTTPError:
+        except ExternalAPIError:
             return False
 
     async def close(self) -> None:
-        await self._client.aclose()
+        await self._client.close()
+
